@@ -1,626 +1,570 @@
 /* =========================================================
-   FitCampus AI — Application Logic
-   All DOM access happens after DOMContentLoaded so elements
-   are guaranteed to exist before event listeners attach.
+   FitCampus AI — Live App Logic
+   Real webcam pose detection (MediaPipe Pose) — no fake demo counters.
+   Everything here reacts to actual body landmarks tracked live.
    ========================================================= */
 
-document.addEventListener('DOMContentLoaded', () => {
+(function () {
+  'use strict';
 
   /* ---------------------------------------------------------
-     0. CONSTANTS
-     --------------------------------------------------------- */
-  const STORAGE_KEY = 'fitcampus_ai_state_v1';
-  const SQUAT_GOAL = 20;
-  const WATER_GOAL = 8;
-  const POINTS_PER_SQUAT = 10;
-  const CALORIES_PER_SQUAT = 0.32;
-  const SQUAT_XP_REWARD = 50;
-  const WALK_XP_REWARD = 30;
-  const WATER_XP_REWARD = 20;
+     0. DOM SHORTCUTS
+  --------------------------------------------------------- */
+  const $ = (id) => document.getElementById(id);
 
-  // MediaPipe Pose landmark indices (BlazePose 33-point model)
-  const LM = {
-    LEFT_HIP: 23, LEFT_KNEE: 25, LEFT_ANKLE: 27,
-    RIGHT_HIP: 24, RIGHT_KNEE: 26, RIGHT_ANKLE: 28
+  const els = {
+    toastContainer: $('toastContainer'),
+    studyBreakModal: $('studyBreakModal'),
+    startQuickExerciseBtn: $('startQuickExerciseBtn'),
+    dismissBreakBtn: $('dismissBreakBtn'),
+
+    navbar: $('navbar'),
+    hamburgerBtn: $('hamburgerBtn'),
+    navLinks: $('navLinks'),
+    navStartWorkoutBtn: $('navStartWorkoutBtn'),
+
+    heroStartWorkoutBtn: $('heroStartWorkoutBtn'),
+    heroViewChallengesBtn: $('heroViewChallengesBtn'),
+
+    exerciseSelect: $('exerciseSelect'),
+    cameraStatusBadge: $('cameraStatusBadge'),
+    inputVideo: $('inputVideo'),
+    outputCanvas: $('outputCanvas'),
+    cameraPlaceholder: $('cameraPlaceholder'),
+    cameraLoading: $('cameraLoading'),
+    cameraErrorBox: $('cameraErrorBox'),
+    cameraErrorText: $('cameraErrorText'),
+
+    startCameraBtn: $('startCameraBtn'),
+    stopCameraBtn: $('stopCameraBtn'),
+    resetWorkoutBtn: $('resetWorkoutBtn'),
+    feedbackText: $('feedbackText'),
+
+    repsValue: $('repsValue'),
+    stageValue: $('stageValue'),
+    sessionCaloriesValue: $('sessionCaloriesValue'),
+    sessionPointsValue: $('sessionPointsValue'),
+
+    squatChallengeBar: $('squatChallengeBar'),
+    squatChallengeText: $('squatChallengeText'),
+    squatChallengeStatus: $('squatChallengeStatus'),
+    walkChallengeBar: $('walkChallengeBar'),
+    walkChallengeText: $('walkChallengeText'),
+    markWalkBtn: $('markWalkBtn'),
+    waterChallengeBar: $('waterChallengeBar'),
+    waterChallengeText: $('waterChallengeText'),
+    addWaterBtn: $('addWaterBtn'),
+
+    dashTotalSquats: $('dashTotalSquats'),
+    dashTotalPoints: $('dashTotalPoints'),
+    dashStreak: $('dashStreak'),
+    dashCalories: $('dashCalories'),
+    scoreRing: $('scoreRing'),
+    fitnessScoreValue: $('fitnessScoreValue'),
+    dailyGoalBar: $('dailyGoalBar'),
+    dailyGoalText: $('dailyGoalText'),
+    resetAllBtn: $('resetAllBtn'),
+    leaderboardList: $('leaderboardList'),
   };
 
-  const LEADERBOARD_BASE = [
-    { name: 'Rahul Sharma', xp: 1250 },
-    { name: 'Priya Singh', xp: 1100 },
-    { name: 'Vinay Kumar', xp: 900 },
-    { name: 'Aman Verma', xp: 850 }
-  ];
+  const canvasCtx = els.outputCanvas.getContext('2d');
 
   /* ---------------------------------------------------------
-     1. DOM REFERENCES
-     --------------------------------------------------------- */
-  const el = (id) => document.getElementById(id);
+     1. PERSISTENT STATE (localStorage)
+  --------------------------------------------------------- */
+  const STORAGE_KEY = 'fitcampusAI_v1';
+  const todayStr = () => new Date().toISOString().slice(0, 10);
 
-  const navbar = el('navbar');
-  const hamburgerBtn = el('hamburgerBtn');
-  const navLinks = el('navLinks');
-  const navStartWorkoutBtn = el('navStartWorkoutBtn');
-  const heroStartWorkoutBtn = el('heroStartWorkoutBtn');
-  const heroViewChallengesBtn = el('heroViewChallengesBtn');
+  const CAL_PER_REP = { squats: 0.32, pushups: 0.4, jumpingjacks: 0.22 };
+  const XP_PER_REP = 2;
+  const DAILY_SQUAT_GOAL = 20;
+  const WATER_GOAL = 8;
 
-  const exerciseSelect = el('exerciseSelect');
-  const cameraStatusBadge = el('cameraStatusBadge');
-  const inputVideo = el('inputVideo');
-  const outputCanvas = el('outputCanvas');
-  const canvasCtx = outputCanvas.getContext('2d');
-  const cameraPlaceholder = el('cameraPlaceholder');
-  const cameraLoading = el('cameraLoading');
-  const cameraErrorBox = el('cameraErrorBox');
-  const cameraErrorText = el('cameraErrorText');
-
-  const startCameraBtn = el('startCameraBtn');
-  const stopCameraBtn = el('stopCameraBtn');
-  const resetWorkoutBtn = el('resetWorkoutBtn');
-  const feedbackText = el('feedbackText');
-
-  const repsValue = el('repsValue');
-  const stageValue = el('stageValue');
-  const sessionCaloriesValue = el('sessionCaloriesValue');
-  const sessionPointsValue = el('sessionPointsValue');
-
-  const squatChallengeBar = el('squatChallengeBar');
-  const squatChallengeText = el('squatChallengeText');
-  const squatChallengeStatus = el('squatChallengeStatus');
-  const walkChallengeBar = el('walkChallengeBar');
-  const walkChallengeText = el('walkChallengeText');
-  const markWalkBtn = el('markWalkBtn');
-  const waterChallengeBar = el('waterChallengeBar');
-  const waterChallengeText = el('waterChallengeText');
-  const addWaterBtn = el('addWaterBtn');
-
-  const dashTotalSquats = el('dashTotalSquats');
-  const dashTotalPoints = el('dashTotalPoints');
-  const dashStreak = el('dashStreak');
-  const dashCalories = el('dashCalories');
-  const scoreRing = el('scoreRing');
-  const fitnessScoreValue = el('fitnessScoreValue');
-  const dailyGoalBar = el('dailyGoalBar');
-  const dailyGoalText = el('dailyGoalText');
-  const resetAllBtn = el('resetAllBtn');
-  const leaderboardList = el('leaderboardList');
-
-  const toastContainer = el('toastContainer');
-  const studyBreakModal = el('studyBreakModal');
-  const startQuickExerciseBtn = el('startQuickExerciseBtn');
-  const dismissBreakBtn = el('dismissBreakBtn');
-
-  /* ---------------------------------------------------------
-     2. STATE (persisted) + SESSION (not persisted)
-     --------------------------------------------------------- */
-  function getDefaultState() {
+  function defaultState() {
     return {
-      totalPoints: 0,
-      totalSquatsAllTime: 0,
-      caloriesTotal: 0,
-      squatsToday: 0,
-      waterToday: 0,
+      totals: { squats: 0, pushups: 0, jumpingjacks: 0, points: 0, calories: 0 },
       streak: 0,
-      lastActiveDate: null, // 'YYYY-MM-DD'
-      challenges: { squat: false, walk: false, hydration: false }
+      lastActiveDate: null,
+      daily: {
+        date: todayStr(),
+        squats: 0,
+        pushups: 0,
+        jumpingjacks: 0,
+        water: 0,
+        walkDone: false,
+      },
     };
+  }
+
+  function loadState() {
+    let s;
+    try {
+      s = JSON.parse(localStorage.getItem(STORAGE_KEY));
+    } catch (e) {
+      s = null;
+    }
+    if (!s) return defaultState();
+
+    // Roll the daily bucket over if it's a new day
+    if (s.daily.date !== todayStr()) {
+      s.daily = {
+        date: todayStr(),
+        squats: 0,
+        pushups: 0,
+        jumpingjacks: 0,
+        water: 0,
+        walkDone: false,
+      };
+    }
+    return s;
+  }
+
+  function saveState() {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   }
 
   let state = loadState();
 
-  // Session-only counters, reset by "Reset Workout" (not persisted across reload)
-  let session = { reps: 0, calories: 0, points: 0, stage: null };
-
-  function loadState() {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (!raw) return getDefaultState();
-      const parsed = JSON.parse(raw);
-      // Merge with defaults in case of missing fields (forward compatibility)
-      return Object.assign(getDefaultState(), parsed, {
-        challenges: Object.assign({ squat: false, walk: false, hydration: false }, parsed.challenges || {})
-      });
-    } catch (e) {
-      console.error('Failed to load saved progress, starting fresh.', e);
-      return getDefaultState();
-    }
-  }
-
-  function saveState() {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-    } catch (e) {
-      console.error('Failed to save progress to localStorage.', e);
-    }
-  }
-
-  function todayStr() {
-    return new Date().toISOString().slice(0, 10);
-  }
-
-  // Resets day-scoped counters (squatsToday, waterToday, challenges) if the
-  // stored date is not today. Must run once at load, before rendering.
-  function checkNewDay() {
+  function registerActivityForStreak() {
     const today = todayStr();
-    if (state.lastActiveDate !== today) {
-      state.squatsToday = 0;
-      state.waterToday = 0;
-      state.challenges = { squat: false, walk: false, hydration: false };
-    }
-  }
-
-  // Marks the user active today and updates the streak. Safe to call
-  // multiple times per day — only the first call each day changes the streak.
-  function markActiveToday() {
-    const today = todayStr();
-    if (state.lastActiveDate === today) return;
-
-    if (state.lastActiveDate) {
-      const prevDate = new Date(state.lastActiveDate + 'T00:00:00');
-      const todayDate = new Date(today + 'T00:00:00');
-      const diffDays = Math.round((todayDate - prevDate) / (1000 * 60 * 60 * 24));
-      state.streak = (diffDays === 1) ? state.streak + 1 : 1;
+    if (state.lastActiveDate === today) return; // already counted today
+    const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+    if (state.lastActiveDate === yesterday) {
+      state.streak += 1;
     } else {
       state.streak = 1;
     }
     state.lastActiveDate = today;
   }
 
-  checkNewDay();
-  saveState();
-
   /* ---------------------------------------------------------
-     3. TOASTS
-     --------------------------------------------------------- */
+     2. TOASTS
+  --------------------------------------------------------- */
   function showToast(message, type = 'success') {
     const toast = document.createElement('div');
     toast.className = 'toast' + (type === 'error' ? ' toast-error' : '');
     toast.textContent = message;
-    toastContainer.appendChild(toast);
+    els.toastContainer.appendChild(toast);
     setTimeout(() => {
-      toast.style.transition = 'opacity .3s ease';
       toast.style.opacity = '0';
-      setTimeout(() => toast.remove(), 300);
+      toast.style.transform = 'translateX(20px)';
+      toast.style.transition = 'opacity .25s ease, transform .25s ease';
+      setTimeout(() => toast.remove(), 260);
     }, 3200);
   }
 
   /* ---------------------------------------------------------
-     4. NAVIGATION
-     --------------------------------------------------------- */
-  hamburgerBtn.addEventListener('click', () => {
-    navLinks.classList.toggle('open');
+     3. NAV / SCROLL BEHAVIOUR
+  --------------------------------------------------------- */
+  els.hamburgerBtn.addEventListener('click', () => {
+    els.navLinks.classList.toggle('open');
   });
 
-  document.querySelectorAll('.nav-link').forEach((link) => {
-    link.addEventListener('click', () => navLinks.classList.remove('open'));
-  });
+  function closeMobileNav() {
+    els.navLinks.classList.remove('open');
+  }
 
   function scrollToId(id) {
-    const target = document.getElementById(id);
-    if (target) target.scrollIntoView({ behavior: 'smooth' });
+    const el = document.getElementById(id);
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    closeMobileNav();
   }
 
-  navStartWorkoutBtn.addEventListener('click', () => {
-    scrollToId('ai-workout');
-    startCamera();
+  document.querySelectorAll('.nav-link').forEach((a) => {
+    a.addEventListener('click', closeMobileNav);
   });
-  heroStartWorkoutBtn.addEventListener('click', () => {
+
+  els.heroViewChallengesBtn.addEventListener('click', () => scrollToId('challenges'));
+
+  function goToWorkoutAndStart() {
     scrollToId('ai-workout');
-    startCamera();
-  });
-  heroViewChallengesBtn.addEventListener('click', () => scrollToId('challenges'));
+    setTimeout(() => {
+      if (!cameraActive) startCamera();
+    }, 450);
+  }
+  els.heroStartWorkoutBtn.addEventListener('click', goToWorkoutAndStart);
+  els.navStartWorkoutBtn.addEventListener('click', goToWorkoutAndStart);
 
   /* ---------------------------------------------------------
-     5. EXERCISE SELECT (squats is the only fully working MVP)
-     --------------------------------------------------------- */
-  exerciseSelect.addEventListener('change', () => {
-    if (exerciseSelect.value !== 'squats') {
-      showToast('Push-up and jumping-jack detection are coming soon — showing the squat tracker for now.', 'error');
-      exerciseSelect.value = 'squats';
-    }
-  });
+     4. STUDY BREAK MODAL (real inactivity-based reminder)
+  --------------------------------------------------------- */
+  const BREAK_INTERVAL_MS = 20 * 60 * 1000; // 20 minutes of sitting
+  let breakTimer = null;
 
-  /* ---------------------------------------------------------
-     6. CAMERA + MEDIAPIPE POSE
-     --------------------------------------------------------- */
-  let videoStream = null;
-  let poseInstance = null;
-  let cameraRunning = false;
-  let rafId = null;
-  let firstResultReceived = false;
-
-  function setCameraStatus(text, kind) {
-    cameraStatusBadge.textContent = text;
-    cameraStatusBadge.className = 'status-badge ' +
-      (kind === 'active' ? 'status-active' : kind === 'error' ? 'status-error' : 'status-idle');
-  }
-
-  function showCameraState(state_) {
-    // state_: 'placeholder' | 'loading' | 'error' | 'live'
-    cameraPlaceholder.classList.toggle('hidden', state_ !== 'placeholder');
-    cameraLoading.classList.toggle('hidden', state_ !== 'loading');
-    cameraErrorBox.classList.toggle('hidden', state_ !== 'error');
-    inputVideo.classList.toggle('hidden', state_ !== 'live');
-  }
-
-  function handleCameraError(err) {
-    console.error('Camera error:', err);
-    let message = 'Something went wrong while accessing the camera.';
-    if (err && err.name === 'NotAllowedError') {
-      message = 'Camera access was denied. Please allow camera permission in your browser settings and try again.';
-    } else if (err && err.name === 'NotFoundError') {
-      message = 'No camera was found on this device.';
-    } else if (err && err.name === 'NotReadableError') {
-      message = 'Your camera is already in use by another application.';
-    } else if (err && err.message) {
-      message = err.message;
-    }
-    cameraErrorText.textContent = message;
-    showCameraState('error');
-    setCameraStatus('Camera Error', 'error');
-    showToast(message, 'error');
-    stopCamera(); // ensure everything is cleaned up
-  }
-
-  async function startCamera() {
-    if (cameraRunning) return; // prevent duplicate camera instances
-
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      handleCameraError({ message: 'Your browser does not support camera access. Please use Chrome, Firefox, or Edge.' });
-      return;
-    }
-    if (typeof Pose === 'undefined') {
-      handleCameraError({ message: 'The AI engine failed to load. Please check your internet connection and refresh the page.' });
-      return;
-    }
-
-    startCameraBtn.disabled = true;
-    showCameraState('loading');
-    setCameraStatus('Initializing...', 'idle');
-
-    try {
-      videoStream = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 640 }, height: { ideal: 480 } },
-        audio: false
-      });
-
-      inputVideo.srcObject = videoStream;
-      await inputVideo.play();
-
-      await new Promise((resolve) => {
-        if (inputVideo.videoWidth) return resolve();
-        inputVideo.onloadedmetadata = () => resolve();
-      });
-      outputCanvas.width = inputVideo.videoWidth || 640;
-      outputCanvas.height = inputVideo.videoHeight || 480;
-
-      if (!poseInstance) {
-        poseInstance = new Pose({
-          locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`
-        });
-        poseInstance.setOptions({
-          modelComplexity: 1,
-          smoothLandmarks: true,
-          minDetectionConfidence: 0.5,
-          minTrackingConfidence: 0.5
-        });
-        poseInstance.onResults(onPoseResults);
+  function scheduleBreakReminder() {
+    clearTimeout(breakTimer);
+    breakTimer = setTimeout(() => {
+      if (!cameraActive) {
+        els.studyBreakModal.classList.remove('hidden');
+      } else {
+        scheduleBreakReminder(); // already moving, push it back
       }
+    }, BREAK_INTERVAL_MS);
+  }
 
-      cameraRunning = true;
-      firstResultReceived = false;
-      stopCameraBtn.disabled = false;
-      startCameraBtn.disabled = true;
-      showCameraState('live');
-      feedbackText.textContent = 'Analyzing your pose...';
+  els.dismissBreakBtn.addEventListener('click', () => {
+    els.studyBreakModal.classList.add('hidden');
+    scheduleBreakReminder();
+  });
+  els.startQuickExerciseBtn.addEventListener('click', () => {
+    els.studyBreakModal.classList.add('hidden');
+    goToWorkoutAndStart();
+  });
+  scheduleBreakReminder();
 
-      processFrame();
-    } catch (err) {
-      startCameraBtn.disabled = false;
-      handleCameraError(err);
+  /* ---------------------------------------------------------
+     5. POSE MATH HELPERS
+  --------------------------------------------------------- */
+  function angleAt(a, b, c) {
+    // angle at point b, formed by rays b->a and b->c, in degrees
+    const rad =
+      Math.atan2(c.y - b.y, c.x - b.x) - Math.atan2(a.y - b.y, a.x - b.x);
+    let deg = Math.abs((rad * 180) / Math.PI);
+    if (deg > 180) deg = 360 - deg;
+    return deg;
+  }
+
+  function visible(lm, idx, threshold = 0.5) {
+    return lm[idx] && (lm[idx].visibility === undefined || lm[idx].visibility >= threshold);
+  }
+
+  const LM = {
+    L_SHOULDER: 11, R_SHOULDER: 12,
+    L_ELBOW: 13, R_ELBOW: 14,
+    L_WRIST: 15, R_WRIST: 16,
+    L_HIP: 23, R_HIP: 24,
+    L_KNEE: 25, R_KNEE: 26,
+    L_ANKLE: 27, R_ANKLE: 28,
+  };
+
+  /* ---------------------------------------------------------
+     6. EXERCISE STATE MACHINES
+  --------------------------------------------------------- */
+  const session = { reps: 0, stage: 'up', calories: 0, points: 0 };
+  let repFlashTimer = null;
+
+  function pulseRep() {
+    els.repsValue.classList.remove('rep-pulse');
+    void els.repsValue.offsetWidth; // restart animation
+    els.repsValue.classList.add('rep-pulse');
+  }
+
+  function flashFeedback(kind) {
+    const bar = els.feedbackText.closest('.feedback-bar');
+    bar.classList.remove('flash-good', 'flash-warn');
+    bar.classList.add(kind === 'good' ? 'flash-good' : 'flash-warn');
+    clearTimeout(repFlashTimer);
+    repFlashTimer = setTimeout(() => bar.classList.remove('flash-good', 'flash-warn'), 500);
+  }
+
+  function setFeedback(text, kind) {
+    els.feedbackText.textContent = text;
+    if (kind) flashFeedback(kind);
+  }
+
+  function onRepCompleted(exerciseKey) {
+    session.reps += 1;
+    session.calories += CAL_PER_REP[exerciseKey];
+    session.points += XP_PER_REP;
+
+    state.totals[exerciseKey] += 1;
+    state.totals.points += XP_PER_REP;
+    state.totals.calories += CAL_PER_REP[exerciseKey];
+    state.daily[exerciseKey] += 1;
+    registerActivityForStreak();
+    saveState();
+
+    pulseRep();
+    updateSessionUI();
+    updateChallenges();
+    updateDashboard();
+
+    if (session.reps % 5 === 0) {
+      showToast(`${session.reps} reps this session — keep going!`);
+      speak(`${session.reps} reps`);
     }
   }
 
-  function processFrame() {
-    if (!cameraRunning) return;
-    poseInstance.send({ image: inputVideo })
-      .then(() => {
-        if (cameraRunning) rafId = requestAnimationFrame(processFrame);
-      })
-      .catch((e) => {
-        console.error('Pose processing error:', e);
-        if (cameraRunning) rafId = requestAnimationFrame(processFrame);
-      });
+  function speak(text) {
+    if (!('speechSynthesis' in window)) return;
+    try {
+      const u = new SpeechSynthesisUtterance(text);
+      u.rate = 1.05;
+      u.volume = 0.6;
+      window.speechSynthesis.speak(u);
+    } catch (e) {
+      /* ignore speech errors silently */
+    }
+  }
+
+  function processSquats(lm) {
+    const leftOk = visible(lm, LM.L_HIP) && visible(lm, LM.L_KNEE) && visible(lm, LM.L_ANKLE);
+    const rightOk = visible(lm, LM.R_HIP) && visible(lm, LM.R_KNEE) && visible(lm, LM.R_ANKLE);
+    if (!leftOk && !rightOk) {
+      setFeedback('Step back so your hips, knees and ankles are all visible.');
+      return;
+    }
+    const angles = [];
+    if (leftOk) angles.push(angleAt(lm[LM.L_HIP], lm[LM.L_KNEE], lm[LM.L_ANKLE]));
+    if (rightOk) angles.push(angleAt(lm[LM.R_HIP], lm[LM.R_KNEE], lm[LM.R_ANKLE]));
+    const kneeAngle = angles.reduce((a, b) => a + b, 0) / angles.length;
+
+    if (kneeAngle < 100) {
+      if (session.stage === 'up') setFeedback('Good depth — now drive back up!', 'good');
+      session.stage = 'down';
+    } else if (kneeAngle > 160) {
+      if (session.stage === 'down') {
+        session.stage = 'up';
+        onRepCompleted('squats');
+        setFeedback('Nice squat! Reset and go again.', 'good');
+      } else if (session.stage === 'up') {
+        setFeedback('Bend your knees to start a squat.');
+      }
+    } else if (session.stage === 'up') {
+      setFeedback('Go lower for a full rep.', 'warn');
+    }
+    els.stageValue.textContent = session.stage === 'down' ? 'Down' : 'Up';
+  }
+
+  function processPushups(lm) {
+    const leftOk = visible(lm, LM.L_SHOULDER) && visible(lm, LM.L_ELBOW) && visible(lm, LM.L_WRIST);
+    const rightOk = visible(lm, LM.R_SHOULDER) && visible(lm, LM.R_ELBOW) && visible(lm, LM.R_WRIST);
+    if (!leftOk && !rightOk) {
+      setFeedback('Position yourself so your shoulders, elbows and wrists are visible.');
+      return;
+    }
+    const angles = [];
+    if (leftOk) angles.push(angleAt(lm[LM.L_SHOULDER], lm[LM.L_ELBOW], lm[LM.L_WRIST]));
+    if (rightOk) angles.push(angleAt(lm[LM.R_SHOULDER], lm[LM.R_ELBOW], lm[LM.R_WRIST]));
+    const elbowAngle = angles.reduce((a, b) => a + b, 0) / angles.length;
+
+    if (elbowAngle < 95) {
+      if (session.stage === 'up') setFeedback('Good depth — now push up!', 'good');
+      session.stage = 'down';
+    } else if (elbowAngle > 155) {
+      if (session.stage === 'down') {
+        session.stage = 'up';
+        onRepCompleted('pushups');
+        setFeedback('Solid push-up! Keep your core tight.', 'good');
+      } else if (session.stage === 'up') {
+        setFeedback('Lower your chest to start a rep.');
+      }
+    } else if (session.stage === 'up') {
+      setFeedback('Bend your elbows further for a full rep.', 'warn');
+    }
+    els.stageValue.textContent = session.stage === 'down' ? 'Down' : 'Up';
+  }
+
+  function processJumpingJacks(lm) {
+    const need = [LM.L_SHOULDER, LM.R_SHOULDER, LM.L_WRIST, LM.R_WRIST, LM.L_HIP, LM.R_HIP, LM.L_ANKLE, LM.R_ANKLE];
+    if (!need.every((i) => visible(lm, i))) {
+      setFeedback('Step back so your whole body is visible in frame.');
+      return;
+    }
+    const shoulderY = (lm[LM.L_SHOULDER].y + lm[LM.R_SHOULDER].y) / 2;
+    const wristY = (lm[LM.L_WRIST].y + lm[LM.R_WRIST].y) / 2;
+    const armsUp = wristY < shoulderY - 0.02;
+
+    const hipWidth = Math.abs(lm[LM.L_HIP].x - lm[LM.R_HIP].x);
+    const ankleWidth = Math.abs(lm[LM.L_ANKLE].x - lm[LM.R_ANKLE].x);
+    const legsApart = ankleWidth > hipWidth * 1.6;
+
+    if (armsUp && legsApart) {
+      if (session.stage === 'closed') setFeedback('Great extension — snap back together!', 'good');
+      session.stage = 'open';
+    } else if (!armsUp && !legsApart) {
+      if (session.stage === 'open') {
+        session.stage = 'closed';
+        onRepCompleted('jumpingjacks');
+        setFeedback('Nice jack! Keep the rhythm.', 'good');
+      }
+    }
+    els.stageValue.textContent = session.stage === 'open' ? 'Open' : 'Closed';
+  }
+
+  function processExercise(lm) {
+    const ex = els.exerciseSelect.value;
+    if (ex === 'squats') processSquats(lm);
+    else if (ex === 'pushups') processPushups(lm);
+    else processJumpingJacks(lm);
+  }
+
+  /* ---------------------------------------------------------
+     7. MEDIAPIPE POSE SETUP + CAMERA LOOP
+  --------------------------------------------------------- */
+  let pose = null;
+  let cameraActive = false;
+  let rafId = null;
+  let stream = null;
+
+  function initPose() {
+    if (pose) return pose;
+    pose = new Pose({
+      locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`,
+    });
+    pose.setOptions({
+      modelComplexity: 1,
+      smoothLandmarks: true,
+      enableSegmentation: false,
+      minDetectionConfidence: 0.6,
+      minTrackingConfidence: 0.6,
+    });
+    pose.onResults(onPoseResults);
+    return pose;
   }
 
   function onPoseResults(results) {
-    if (!firstResultReceived) {
-      firstResultReceived = true;
-      setCameraStatus('Camera Active', 'active');
+    if (els.outputCanvas.width !== results.image.width || els.outputCanvas.height !== results.image.height) {
+      els.outputCanvas.width = results.image.width;
+      els.outputCanvas.height = results.image.height;
     }
     canvasCtx.save();
-    canvasCtx.clearRect(0, 0, outputCanvas.width, outputCanvas.height);
+    canvasCtx.clearRect(0, 0, els.outputCanvas.width, els.outputCanvas.height);
 
     if (results.poseLandmarks) {
-      try {
-        if (typeof drawConnectors === 'function') {
-          drawConnectors(canvasCtx, results.poseLandmarks, POSE_CONNECTIONS, { color: '#39ff9d', lineWidth: 3 });
-        }
-        if (typeof drawLandmarks === 'function') {
-          drawLandmarks(canvasCtx, results.poseLandmarks, { color: '#ffffff', radius: 3 });
-        }
-      } catch (e) {
-        console.error('Drawing error:', e);
-      }
-      processSquatDetection(results.poseLandmarks);
+      drawConnectors(canvasCtx, results.poseLandmarks, POSE_CONNECTIONS, {
+        color: '#39ff9d',
+        lineWidth: 3,
+      });
+      drawLandmarks(canvasCtx, results.poseLandmarks, {
+        color: '#eef1f8',
+        fillColor: '#39ff9d',
+        lineWidth: 1,
+        radius: 3,
+      });
+      processExercise(results.poseLandmarks);
     } else {
-      feedbackText.textContent = 'Pose Not Detected';
+      setFeedback('No person detected — step into frame.');
     }
     canvasCtx.restore();
   }
 
+  async function detectLoop() {
+    if (!cameraActive) return;
+    if (els.inputVideo.readyState >= 2) {
+      await pose.send({ image: els.inputVideo });
+    }
+    rafId = requestAnimationFrame(detectLoop);
+  }
+
+  async function startCamera() {
+    if (cameraActive) return;
+    els.startCameraBtn.disabled = true;
+    els.cameraPlaceholder.classList.add('hidden');
+    els.cameraErrorBox.classList.add('hidden');
+    els.cameraLoading.classList.remove('hidden');
+    els.cameraStatusBadge.textContent = 'Starting…';
+    els.cameraStatusBadge.className = 'status-badge status-idle';
+
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
+        audio: false,
+      });
+      els.inputVideo.srcObject = stream;
+      await els.inputVideo.play();
+
+      initPose();
+
+      els.inputVideo.classList.remove('hidden');
+      els.inputVideo.classList.add('mirror');
+      els.outputCanvas.classList.add('mirror');
+      els.cameraLoading.classList.add('hidden');
+
+      cameraActive = true;
+      session.stage = els.exerciseSelect.value === 'jumpingjacks' ? 'closed' : 'up';
+      els.stopCameraBtn.disabled = false;
+      els.cameraStatusBadge.textContent = 'Live';
+      els.cameraStatusBadge.className = 'status-badge status-active';
+      setFeedback("You're live — let's see that first rep!");
+      scheduleBreakReminder();
+
+      detectLoop();
+    } catch (err) {
+      console.error(err);
+      els.cameraLoading.classList.add('hidden');
+      els.cameraPlaceholder.classList.add('hidden');
+      els.cameraErrorBox.classList.remove('hidden');
+      let msg = 'Could not access your camera.';
+      if (err && err.name === 'NotAllowedError') {
+        msg = 'Camera permission was denied. Allow camera access in your browser settings and try again.';
+      } else if (err && err.name === 'NotFoundError') {
+        msg = 'No camera was found on this device.';
+      }
+      els.cameraErrorText.textContent = msg;
+      els.cameraStatusBadge.textContent = 'Error';
+      els.cameraStatusBadge.className = 'status-badge status-error';
+      els.startCameraBtn.disabled = false;
+      showToast(msg, 'error');
+    }
+  }
+
   function stopCamera() {
-    cameraRunning = false;
-    if (rafId) {
-      cancelAnimationFrame(rafId);
-      rafId = null;
+    cameraActive = false;
+    if (rafId) cancelAnimationFrame(rafId);
+    if (stream) {
+      stream.getTracks().forEach((t) => t.stop());
+      stream = null;
     }
-    if (videoStream) {
-      videoStream.getTracks().forEach((track) => track.stop());
-      videoStream = null;
-    }
-    inputVideo.srcObject = null;
-    canvasCtx.clearRect(0, 0, outputCanvas.width, outputCanvas.height);
+    els.inputVideo.pause();
+    els.inputVideo.srcObject = null;
+    els.inputVideo.classList.add('hidden');
+    canvasCtx.clearRect(0, 0, els.outputCanvas.width, els.outputCanvas.height);
 
-    startCameraBtn.disabled = false;
-    stopCameraBtn.disabled = true;
-    setCameraStatus('Camera Idle', 'idle');
-    showCameraState('placeholder');
-    feedbackText.textContent = 'Camera stopped.';
-    session.stage = null;
-    stageValue.textContent = '—';
+    els.cameraPlaceholder.classList.remove('hidden');
+    els.cameraErrorBox.classList.add('hidden');
+    els.startCameraBtn.disabled = false;
+    els.stopCameraBtn.disabled = true;
+    els.cameraStatusBadge.textContent = 'Camera Idle';
+    els.cameraStatusBadge.className = 'status-badge status-idle';
+    setFeedback('Ready when you are.');
   }
 
-  startCameraBtn.addEventListener('click', startCamera);
-  stopCameraBtn.addEventListener('click', stopCamera);
+  els.startCameraBtn.addEventListener('click', startCamera);
+  els.stopCameraBtn.addEventListener('click', stopCamera);
 
-  /* ---------------------------------------------------------
-     7. SQUAT DETECTION LOGIC
-     --------------------------------------------------------- */
-  function calculateAngle(a, b, c) {
-    const radians = Math.atan2(c.y - b.y, c.x - b.x) - Math.atan2(a.y - b.y, a.x - b.x);
-    let angle = Math.abs((radians * 180.0) / Math.PI);
-    if (angle > 180) angle = 360 - angle;
-    return angle;
-  }
-
-  function processSquatDetection(landmarks) {
-    const leftVis = ((landmarks[LM.LEFT_HIP].visibility || 0) +
-      (landmarks[LM.LEFT_KNEE].visibility || 0) +
-      (landmarks[LM.LEFT_ANKLE].visibility || 0)) / 3;
-    const rightVis = ((landmarks[LM.RIGHT_HIP].visibility || 0) +
-      (landmarks[LM.RIGHT_KNEE].visibility || 0) +
-      (landmarks[LM.RIGHT_ANKLE].visibility || 0)) / 3;
-
-    const useLeft = leftVis >= rightVis;
-    const vis = useLeft ? leftVis : rightVis;
-
-    if (vis < 0.5) {
-      feedbackText.textContent = 'Move Back - Full Body Not Visible';
-      return;
-    }
-
-    const hip = useLeft ? landmarks[LM.LEFT_HIP] : landmarks[LM.RIGHT_HIP];
-    const knee = useLeft ? landmarks[LM.LEFT_KNEE] : landmarks[LM.RIGHT_KNEE];
-    const ankle = useLeft ? landmarks[LM.LEFT_ANKLE] : landmarks[LM.RIGHT_ANKLE];
-
-    const angle = calculateAngle(hip, knee, ankle);
-
-    if (angle > 160) {
-      if (session.stage === 'down') {
-        session.stage = 'up';
-        stageValue.textContent = 'UP';
-        feedbackText.textContent = 'Great Squat!';
-        incrementSquatRep();
-      } else {
-        session.stage = 'up';
-        stageValue.textContent = 'UP';
-        feedbackText.textContent = 'Ready';
-      }
-    } else if (angle < 100) {
-      session.stage = 'down';
-      stageValue.textContent = 'DOWN';
-      feedbackText.textContent = 'Good Depth!';
-    } else {
-      if (session.stage === 'up' || session.stage === null) {
-        feedbackText.textContent = 'Go Down';
-      } else {
-        feedbackText.textContent = 'Stand Up';
-      }
-    }
-  }
-
-  function incrementSquatRep() {
-    session.reps += 1;
-    session.calories += CALORIES_PER_SQUAT;
-    session.points += POINTS_PER_SQUAT;
-
-    state.squatsToday += 1;
-    state.totalSquatsAllTime += 1;
-    state.totalPoints += POINTS_PER_SQUAT;
-    state.caloriesTotal += CALORIES_PER_SQUAT;
-
-    markActiveToday();
-    checkSquatChallenge();
-    saveState();
-    renderAll();
-  }
-
-  resetWorkoutBtn.addEventListener('click', () => {
-    session = { reps: 0, calories: 0, points: 0, stage: cameraRunning ? session.stage : null };
-    feedbackText.textContent = cameraRunning ? 'Workout reset. Ready when you are.' : 'Ready when you are.';
-    renderWorkoutStats();
-    showToast('Workout reps, calories and points reset for this session.');
+  els.resetWorkoutBtn.addEventListener('click', () => {
+    session.reps = 0;
+    session.calories = 0;
+    session.points = 0;
+    session.stage = els.exerciseSelect.value === 'jumpingjacks' ? 'closed' : 'up';
+    updateSessionUI();
+    setFeedback('Session reset. Ready when you are.');
   });
+
+  els.exerciseSelect.addEventListener('change', () => {
+    session.reps = 0;
+    session.calories = 0;
+    session.points = 0;
+    session.stage = els.exerciseSelect.value === 'jumpingjacks' ? 'closed' : 'up';
+    updateSessionUI();
+    const labels = { squats: 'Squat Reps', pushups: 'Push-up Reps', jumpingjacks: 'Jack Reps' };
+    els.repsValue.parentElement.querySelector('.stat-label').textContent = labels[els.exerciseSelect.value];
+    setFeedback('Exercise switched. Stand back and get in frame.');
+  });
+
+  function updateSessionUI() {
+    els.repsValue.textContent = session.reps;
+    els.sessionCaloriesValue.textContent = session.calories.toFixed(1);
+    els.sessionPointsValue.textContent = session.points;
+  }
 
   /* ---------------------------------------------------------
      8. CHALLENGES
-     --------------------------------------------------------- */
-  function checkSquatChallenge() {
-    if (!state.challenges.squat && state.squatsToday >= SQUAT_GOAL) {
-      state.challenges.squat = true;
-      state.totalPoints += SQUAT_XP_REWARD;
-      showToast(`Daily Squat Challenge complete! +${SQUAT_XP_REWARD} XP`);
-    }
-  }
+  --------------------------------------------------------- */
+  function updateChallenges() {
+    const squatProgress = Math.min(state.daily.squats, DAILY_SQUAT_GOAL);
+    const squatPct = (squatProgress / DAILY_SQUAT_GOAL) * 100;
+    els.squatChallengeBar.style.width = squatPct + '%';
+    els.squatChallengeText.textContent = `${squatProgress} / ${DAILY_SQUAT_GOAL} squats`;
+    els.squatChallengeStatus.textContent = squatProgress >= DAILY_SQUAT_GOAL ? 'Completed' : 'In Progress';
+    els.squatChallengeStatus.classList.toggle('completed', squatProgress >= DAILY_SQUAT_GOAL);
 
-  markWalkBtn.addEventListener('click', () => {
-    if (state.challenges.walk) return; // prevent duplicate reward
-    state.challenges.walk = true;
-    state.totalPoints += WALK_XP_REWARD;
-    markActiveToday();
-    saveState();
-    renderAll();
-    showToast(`Move More challenge complete! +${WALK_XP_REWARD} XP`);
-  });
+    els.walkChallengeBar.style.width = state.daily.walkDone ? '100%' : '0%';
+    els.walkChallengeText.textContent = state.daily.walkDone ? 'Completed today!' : 'Not completed';
+    els.markWalkBtn.disabled = state.daily.walkDone;
+    els.markWalkBtn.textContent = state.daily.walkDone ? 'Completed ✓' : 'Mark Walk Complete';
 
-  addWaterBtn.addEventListener('click', () => {
-    if (state.waterToday >= WATER_GOAL) return;
-    state.waterToday += 1;
-    markActiveToday();
-    if (!state.challenges.hydration && state.waterToday >= WATER_GOAL) {
-      state.challenges.hydration = true;
-      state.totalPoints += WATER_XP_REWARD;
-      showToast(`Hydration Hero challenge complete! +${WATER_XP_REWARD} XP`);
-    }
-    saveState();
-    renderAll();
-  });
-
-  /* ---------------------------------------------------------
-     9. RESET ALL PROGRESS
-     --------------------------------------------------------- */
-  resetAllBtn.addEventListener('click', () => {
-    const confirmed = window.confirm('This will permanently erase all saved progress on this device. Continue?');
-    if (!confirmed) return;
-    state = getDefaultState();
-    session = { reps: 0, calories: 0, points: 0, stage: null };
-    saveState();
-    renderAll();
-    showToast('All progress has been reset.');
-  });
-
-  /* ---------------------------------------------------------
-     10. RENDERING
-     --------------------------------------------------------- */
-  function renderWorkoutStats() {
-    repsValue.textContent = session.reps;
-    sessionCaloriesValue.textContent = Math.round(session.calories);
-    sessionPointsValue.textContent = session.points;
-    stageValue.textContent = session.stage ? session.stage.toUpperCase() : '—';
-  }
-
-  function renderChallenges() {
-    // Squat challenge
-    const squatPct = Math.min(100, (state.squatsToday / SQUAT_GOAL) * 100);
-    squatChallengeBar.style.width = squatPct + '%';
-    squatChallengeText.textContent = `${Math.min(state.squatsToday, SQUAT_GOAL)} / ${SQUAT_GOAL} squats`;
-    squatChallengeStatus.textContent = state.challenges.squat ? 'Completed ✓' : 'In Progress';
-    squatChallengeStatus.classList.toggle('completed', state.challenges.squat);
-
-    // Walk challenge
-    walkChallengeBar.style.width = state.challenges.walk ? '100%' : '0%';
-    walkChallengeText.textContent = state.challenges.walk ? 'Completed today ✓' : 'Not completed';
-    markWalkBtn.disabled = state.challenges.walk;
-    markWalkBtn.textContent = state.challenges.walk ? 'Completed ✓' : 'Mark Walk Complete';
-
-    // Water challenge
-    const waterPct = Math.min(100, (state.waterToday / WATER_GOAL) * 100);
-    waterChallengeBar.style.width = waterPct + '%';
-    waterChallengeText.textContent = `${state.waterToday} / ${WATER_GOAL} glasses`;
-    addWaterBtn.disabled = state.waterToday >= WATER_GOAL;
-    addWaterBtn.textContent = state.waterToday >= WATER_GOAL ? 'Goal Reached ✓' : 'Add Water Glass';
-  }
-
-  function computeFitnessScore() {
-    const workoutPart = Math.min(1, state.squatsToday / SQUAT_GOAL) * 40;
-    const challengeCount = Object.values(state.challenges).filter(Boolean).length;
-    const challengePart = (challengeCount / 3) * 40;
-    const streakPart = Math.min(state.streak, 5) * 4; // capped at 20
-    return Math.round(Math.min(100, workoutPart + challengePart + streakPart));
-  }
-
-  function renderDashboard() {
-    dashTotalSquats.textContent = state.totalSquatsAllTime;
-    dashTotalPoints.textContent = state.totalPoints;
-    dashStreak.textContent = state.streak;
-    dashCalories.textContent = Math.round(state.caloriesTotal);
-
-    const score = computeFitnessScore();
-    fitnessScoreValue.textContent = score;
-    scoreRing.style.background = `conic-gradient(var(--neon) ${score}%, rgba(255,255,255,0.08) ${score}%)`;
-
-    const goalPct = Math.min(100, (state.squatsToday / SQUAT_GOAL) * 100);
-    dailyGoalBar.style.width = goalPct + '%';
-    dailyGoalText.textContent = `${Math.min(state.squatsToday, SQUAT_GOAL)} / ${SQUAT_GOAL} squats today`;
-  }
-
-  function renderLeaderboard() {
-    const combined = LEADERBOARD_BASE.concat([{ name: 'You', xp: state.totalPoints, isYou: true }]);
-    combined.sort((a, b) => b.xp - a.xp);
-
-    leaderboardList.innerHTML = '';
-    const medals = ['🥇', '🥈', '🥉'];
-    combined.forEach((entry, index) => {
-      const li = document.createElement('li');
-      li.className = 'leaderboard-item' + (entry.isYou ? ' is-you' : '');
-      const rankDisplay = medals[index] || (index + 1);
-      li.innerHTML = `
-        <span class="lb-name"><span class="lb-rank">${rankDisplay}</span> ${entry.name}</span>
-        <span class="lb-xp">${entry.xp} XP</span>
-      `;
-      leaderboardList.appendChild(li);
-    });
-  }
-
-  function renderAll() {
-    renderWorkoutStats();
-    renderChallenges();
-    renderDashboard();
-    renderLeaderboard();
-  }
-
-  /* ---------------------------------------------------------
-     11. STUDY BREAK REMINDER
-     --------------------------------------------------------- */
-  // Demo interval: 60 seconds. For production, change 60000 to 30 * 60 * 1000 (30 minutes).
-  const STUDY_BREAK_INTERVAL_MS = 60000;
-  let studyBreakTimeoutId = null;
-
-  function scheduleStudyBreak() {
-    if (studyBreakTimeoutId) clearTimeout(studyBreakTimeoutId);
-    studyBreakTimeoutId = setTimeout(showStudyBreakModal, STUDY_BREAK_INTERVAL_MS);
-  }
-
-  function showStudyBreakModal() {
-    studyBreakModal.classList.remove('hidden');
-  }
-
-  function hideStudyBreakModal() {
-    studyBreakModal.classList.add('hidden');
-    scheduleStudyBreak();
-  }
-
-  startQuickExerciseBtn.addEventListener('click', () => {
-    hideStudyBreakModal();
-    scrollToId('ai-workout');
-    startCamera();
-  });
-  dismissBreakBtn.addEventListener('click', hideStudyBreakModal);
-
-  scheduleStudyBreak();
-
-  /* ---------------------------------------------------------
-     12. INITIAL RENDER
-     --------------------------------------------------------- */
-  renderAll();
-});
+    const waterPct = (state.daily.water / WATER_GOAL) * 100;
+    els.waterChallengeBar.style.width = Math.min(waterPct, 100) + '%';
+    els.waterChallengeText.textContent = `${state.d
