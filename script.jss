@@ -1,3 +1,4 @@
+console.log("fitcampus script loaded successfully!");
 let squatCount = 0;
 let totalPoints = 0;
 let stage = "up";
